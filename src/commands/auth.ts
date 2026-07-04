@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { clearAuthCache, ensureAuth, getCachedAuthSession, loginWithBrowser, type AuthSession } from '../auth.js';
+import { clearAuthCache, ensureAuth, getCachedAuthSession, loginWithCookie, loginWithBrowser, type AuthSession } from '../auth.js';
 import { getCurrentUserProfile } from '../api/index.js';
 import { withErrorHandler } from '../utils/error.js';
 import { withSpinner } from '../utils/spinner.js';
@@ -25,15 +25,18 @@ export function registerAuthCommands(program: Command): void {
     .command('login')
     .description('打开浏览器登录豆瓣并保存 Cookie')
     .option('--json', '以 JSON 输出')
+    .option('-c, --cookie <cookie>', '传入完整 Cookie 字符串或 Netscape cookies.txt 文件路径，跳过浏览器登录')
     .action(withErrorHandler({
       command: 'login',
-      suggestion: '可尝试：douban login'
+      suggestion: '可尝试：douban login --cookie "..." 手动导入 Cookie'
     }, async (opts) => {
-      const session = await withSpinner(
-        '正在打开浏览器登录豆瓣...',
-        () => loginWithBrowser(),
-        !opts.json
-      );
+      const session = opts.cookie
+        ? await withSpinner(
+          '正在解析传入的 Cookie...',
+          () => loginWithCookie(opts.cookie),
+          !opts.json
+        )
+        : await loginWithBrowser();
 
       if (opts.json) {
         console.log(JSON.stringify(toSafeSessionJson(session), null, 2));
