@@ -1,5 +1,6 @@
-import { cleanText, extractNumericId, fetchHtml, isChallengePage } from './common.js';
+import { cleanText, extractNumericId, fetchHtml, isChallengePage, FETCH_TIMEOUT_MS } from './common.js';
 import { debug } from '../utils/debug.js';
+import { postForm, resolveCk } from './authenticated.js';
 
 const DOULIST_BASE = 'https://www.douban.com';
 
@@ -413,4 +414,265 @@ export async function getUserDoulists(
     total: lists.length,
     lists
   };
+}
+
+// ============================================================
+// 写操作（create / add / remove / edit / follow / unfollow）
+// 所有写操作均需登录态 cookie + ck token。
+// ============================================================
+
+/** 目录分类 → 豆瓣 kind 码 */
+const KIND_BY_CATEGORY: Record<DoulistCategory, string> = {
+  book: '1001',
+  movie: '1002',
+  music: '1003',
+  game: '3114'
+};
+const NOTE_KIND = '1013'; // 小组话题 / 自由链接型条目
+
+function requireCookies(cookies: string | undefined): string {
+  if (!cookies) {
+    throw new Error('该操作需要登录态：请先 `douban login`');
+  }
+  return cookies;
+}
+
+// ── create ────────────────────────────────────────────────
+export interface CreateDoulistOptions {
+  title: string;
+  /** 设为影单/书单（不传则创建混合豆列） */
+  category?: SubjectDoulistCategory;
+  private?: boolean;
+  cookies: string;
+}
+
+export interface CreateDoulistResult {
+  id: string;
+  url: string;
+}
+
+export async function createDoulist(options: CreateDoulistOptions): Promise<CreateDoulistResult> {
+  const cookies = requireCookies(options.cookies);
+  const title = options.title.trim();
+  if (!title) throw new Error('豆列标题不能为空');
+
+  const ck = await resolveCk(cookies);
+  const data: Record<string, string> = {
+    title,
+    is_private: options.private ? '1' : '0',
+    ck
+  };
+  if (options.category) data.category = options.category;
+
+  const res = await postForm(
+    `${DOULIST_BASE}/j/doulist/add`,
+    data,
+    cookies,
+    `${DOULIST_BASE}/`
+  );
+  const id = String(res.id ?? '').trim();
+  if (!id) throw new Error('创建豆列失败：服务端未返回 id');
+  return { id, url: `${DOULIST_BASE}/doulist/${id}/` };
+}
+
+// ── add（条目）────────────────────────────────────────────
+export interface AddDoulistItemOptions {
+  doulistId: string;
+  /** subject 链接 / 小组话题链接 / 外链 URL */
+  target: string;
+  comment?: string;
+  cookies: string;
+}
+
+interface ResolvedTarget {
+  sid?: string;
+  skind?: string;
+  surl?: string;
+}
+
+/** 从目标解析出 sid+skind（目录条目）或 surl（note） */
+function resolveAddTarget(target: string): ResolvedTarget {
+  const subj = target.match(/(book|movie|music)\.douban\.com\/subject\/(\d+)/);
+  if (subj) return { sid: subj[2], skind: KIND_BY_CATEGORY[subj[1] as DoulistCategory] };
+
+  const game = target.match(/www\.douban\.com\/subject\/(\d+)/);
+  if (game) return { sid: game[1], skind: KIND_BY_CATEGORY.game };
+
+  // 小组话题 / 任意外链 → note（surl）
+  if (/^https?:\/\//i.test(target) || /douban\.com\/group\/topic\/\d+/.test(target)) {
+    return { surl: target };
+  }
+
+  throw new Error(
+    `无法识别条目「${target}」：请提供豆瓣 subject 链接（book/movie/music.douban.com/subject/...）、游戏链接、或小组话题/外链 URL`
+  );
+}
+
+export async function addDoulistItem(options: AddDoulistItemOptions): Promise<void> {
+  const cookies = requireCookies(options.cookies);
+  const doulistId = resolveDoulistId(options.doulistId);
+  const ck = await resolveCk(cookies);
+  const { sid, skind, surl } = resolveAddTarget(options.target.trim());
+
+  const data: Record<string, string> = {
+    comment: options.comment?.trim() || '',
+    ck
+  };
+  if (surl) {
+    data.surl = surl;
+  } else {
+    data.sid = sid!;
+    data.skind = skind!;
+  }
+
+  await postForm(
+    `${DOULIST_BASE}/j/doulist/${doulistId}/additem`,
+    data,
+    cookies,
+    `${DOULIST_BASE}/doulist/${doulistId}/`
+  );
+}
+
+// ── remove（条目）─────────────────────────────────────────
+export interface RemoveDoulistItemOptions {
+  doulistId: string;
+  /** 条目 subject 链接、小组话题链接，或 @index（来自 douban doulist view） */
+  target: string;
+  cookies: string;
+}
+
+/** 解析移除目标为 tid + tkind；@index 时回查豆列条目 */
+async function resolveRemoveTarget(
+  doulistId: string,
+  target: string,
+  cookies: string
+): Promise<{ tid: string; tkind: string }> {
+  const trimmed = target.trim();
+
+  if (trimmed.startsWith('@')) {
+    const idx = Number(trimmed.slice(1));
+    if (!Number.isInteger(idx) || idx < 1) {
+      throw new Error(`无效的序号：${trimmed}（应为 @1、@2 …，对应 douban doulist view 输出的序号）`);
+    }
+    const detail = await getDoulistEntries(doulistId, { cookies });
+    const entry = detail.entries.find((e) => e.index === idx);
+    if (!entry) throw new Error(`序号 @${idx} 超出范围（该豆列共 ${detail.total} 条）`);
+
+    if (entry.kind === 'subject' && entry.category) {
+      const tid = entry.subjectId || extractIdFromUrl(entry.url);
+      if (!tid) throw new Error(`无法从该条目解析 subject id：${entry.url}`);
+      return { tid, tkind: KIND_BY_CATEGORY[entry.category] };
+    }
+    // note：tid 取 url 中的数字 id，tkind 为小组类
+    const noteId = extractIdFromUrl(entry.url);
+    if (!noteId) throw new Error(`无法从该 note 条目解析 id：${entry.url}（请改用完整链接）`);
+    return { tid: noteId, tkind: NOTE_KIND };
+  }
+
+  // 链接形式
+  const subj = trimmed.match(/(book|movie|music)\.douban\.com\/subject\/(\d+)/);
+  if (subj) return { tid: subj[2], tkind: KIND_BY_CATEGORY[subj[1] as DoulistCategory] };
+  const game = trimmed.match(/www\.douban\.com\/subject\/(\d+)/);
+  if (game) return { tid: game[1], tkind: KIND_BY_CATEGORY.game };
+  const group = trimmed.match(/group\/topic\/(\d+)/);
+  if (group) return { tid: group[1], tkind: NOTE_KIND };
+
+  throw new Error(
+    `无法识别条目「${trimmed}」：请用 @index（如 @3）或豆瓣 subject/小组话题链接`
+  );
+}
+
+function extractIdFromUrl(url: string): string | undefined {
+  return url.match(/\/(\d{4,})\/?/)?.[1];
+}
+
+export async function removeDoulistItem(options: RemoveDoulistItemOptions): Promise<void> {
+  const cookies = requireCookies(options.cookies);
+  const doulistId = resolveDoulistId(options.doulistId);
+  const ck = await resolveCk(cookies);
+  const { tid, tkind } = await resolveRemoveTarget(doulistId, options.target, cookies);
+
+  await postForm(
+    `${DOULIST_BASE}/j/doulist/${doulistId}/removeitem`,
+    { tid, tkind, ck },
+    cookies,
+    `${DOULIST_BASE}/doulist/${doulistId}/`
+  );
+}
+
+// ── edit（元数据：title / about）──────────────────────────
+export interface EditDoulistOptions {
+  doulistId: string;
+  title?: string;
+  about?: string;
+  cookies: string;
+}
+
+/**
+ * 编辑豆列标题/简介。edit 表单会全量提交字段，故先抓取当前值再合并覆盖，
+ * 避免只改标题却清空简介/标签。
+ */
+export async function editDoulist(options: EditDoulistOptions): Promise<void> {
+  const cookies = requireCookies(options.cookies);
+  const doulistId = resolveDoulistId(options.doulistId);
+  const editUrl = `${DOULIST_BASE}/doulist/${doulistId}/edit`;
+
+  const html = await fetchHtml(editUrl, { Referer: `${DOULIST_BASE}/doulist/${doulistId}/`, Cookie: cookies });
+  if (/没有访问权限|不存在/.test(html)) {
+    throw new Error(`无权编辑豆列 ${doulistId}（仅创建者可改，或登录态已失效）`);
+  }
+
+  const curTitle = html.match(/name="dl_title"[^>]*value="([^"]*)"/)?.[1] || '';
+  const curAbout = html.match(/<textarea[^>]*name="dl_about"[^>]*>([\s\S]*?)<\/textarea>/)?.[1] || '';
+  const tagMatches = [...html.matchAll(/<input[^>]*name="dl_tags"[^>]*checked[^>]*value="([^"]*)"/g)];
+  const tags = tagMatches.map((m) => decodeHtmlEntities(m[1]));
+
+  const ck = await resolveCk(cookies);
+  const form = new FormData();
+  form.append('ck', ck);
+  form.append('dl_title', options.title?.trim() || decodeHtmlEntities(curTitle));
+  form.append('dl_about', options.about !== undefined ? options.about : decodeHtmlEntities(curAbout));
+  for (const tag of tags) form.append('dl_tags', tag);
+
+  const res = await fetch(editUrl, {
+    method: 'POST',
+    headers: { Cookie: cookies, Referer: editUrl },
+    body: form,
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  });
+
+  if (!res.ok) {
+    throw new Error(`编辑豆列失败：HTTP ${res.status}`);
+  }
+}
+
+function decodeHtmlEntities(s: string): string {
+  return s.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'");
+}
+
+// ── follow / unfollow ─────────────────────────────────────
+export async function followDoulist(idOrUrl: string, cookies: string): Promise<void> {
+  requireCookies(cookies);
+  const doulistId = resolveDoulistId(idOrUrl);
+  const ck = await resolveCk(cookies);
+  // 关注为 GET /doulist/{id}/?collect=yes&ck=
+  const html = await fetchHtml(`${DOULIST_BASE}/doulist/${doulistId}/?collect=yes&ck=${encodeURIComponent(ck)}`, {
+    Referer: `${DOULIST_BASE}/doulist/${doulistId}/`,
+    Cookie: cookies
+  });
+  if (/没有访问权限/.test(html)) {
+    throw new Error(`关注豆列 ${doulistId} 失败：无访问权限或登录态已失效`);
+  }
+}
+
+export async function unfollowDoulist(idOrUrl: string, cookies: string): Promise<void> {
+  const cookies_ = requireCookies(cookies);
+  const doulistId = resolveDoulistId(idOrUrl);
+  const ck = await resolveCk(cookies_);
+  await postForm(
+    `${DOULIST_BASE}/j/doulist/decollect`,
+    { dl_id: doulistId, ck },
+    cookies_,
+    `${DOULIST_BASE}/`
+  );
 }

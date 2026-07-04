@@ -3,12 +3,18 @@ import {
   getHotLists,
   getDoulistEntries,
   getUserDoulists,
+  createDoulist,
+  addDoulistItem,
+  removeDoulistItem,
+  editDoulist,
+  followDoulist,
+  unfollowDoulist,
   type DoulistCategory,
   type DoulistEntry,
   type UserDoulist,
   type UserDoulistCategory
 } from '../api/index.js';
-import { getCachedAuthSession } from '../auth.js';
+import { getCachedAuthSession, ensureAuth } from '../auth.js';
 import { withErrorHandler } from '../utils/error.js';
 import { parsePositiveInt } from '../utils/parsing.js';
 import { withSpinner } from '../utils/spinner.js';
@@ -85,7 +91,22 @@ export function registerListCommands(program: Command): void {
   // ── 资源组：doulist（noun-first）──
   const doulist = program
     .command('doulist')
-    .description('管理豆列 / 书单 / 影单（查看、导出、关注等）');
+    .description('管理豆列 / 书单 / 影单（查看、导出、创建、增删条目、关注等）');
+
+  // doulist 子命令用自己的帮助格式（不继承 root 的分类模板）
+  doulist.configureHelp({
+    formatHelp: (cmd) => {
+      let out = '用法: douban doulist <command> [options]\n\n子命令:\n';
+      for (const c of cmd.commands) {
+        out += `  ${c.name().padEnd(10)} ${c.description()}\n`;
+      }
+      out += '\n示例:\n';
+      out += '  douban doulist hot                热门豆列\n';
+      out += '  douban doulist view 163361938     导出某张单的条目\n';
+      out += '  douban doulist ls --user arcana   列某用户的单\n';
+      return out;
+    }
+  });
 
   // doulist hot —— 热门推荐
   doulist
@@ -148,6 +169,87 @@ export function registerListCommands(program: Command): void {
       );
       if (opts.json) console.log(JSON.stringify(result, null, 2));
       else printUserDoulists(result);
+    }));
+
+  // ── write：create / add / remove / edit / follow / unfollow ──
+
+  doulist
+    .command('create')
+    .description('创建豆列 / 书单 / 影单')
+    .requiredOption('--title <title>', '标题')
+    .option('--category <cat>', '影单(movie) / 书单(book)，不传则为混合豆列')
+    .option('--private', '私密豆列')
+    .option('--json', '以 JSON 输出')
+    .action(withErrorHandler({ command: 'doulist create', suggestion: '可尝试：douban doulist create --title "我的影单" --category movie' }, async (opts) => {
+      const auth = await withSpinner('正在检查登录状态...', () => ensureAuth(), !opts.json);
+      const category = opts.category as 'movie' | 'book' | undefined;
+      if (category && category !== 'movie' && category !== 'book') {
+        throw new Error(`--category 仅支持 movie 或 book（${category} 无效）`);
+      }
+      const result = await withSpinner('正在创建豆列...', () => createDoulist({ title: opts.title, category, private: opts.private, cookies: auth.cookies }), !opts.json);
+      if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`\n✓ 已创建：${result.url}`);
+    }));
+
+  doulist
+    .command('add <doulistId> <target>')
+    .description('向豆列添加条目（subject 链接 / 小组话题 / 外链 URL）')
+    .option('-m, --comment <text>', '备注')
+    .option('--json', '以 JSON 输出')
+    .action(withErrorHandler({ command: 'doulist add', suggestion: '可尝试：douban doulist add 163361938 https://movie.douban.com/subject/1292052/' }, async (doulistId, target, opts) => {
+      const auth = await withSpinner('正在检查登录状态...', () => ensureAuth(), !opts.json);
+      await withSpinner('正在添加条目...', () => addDoulistItem({ doulistId, target, comment: opts.comment, cookies: auth.cookies }), !opts.json);
+      if (opts.json) console.log(JSON.stringify({ ok: true }));
+      else console.log(`\n✓ 已添加到豆列 ${doulistId}`);
+    }));
+
+  doulist
+    .command('remove <doulistId> <target>')
+    .description('从豆列移除条目（@index 或 subject/小组话题链接）')
+    .option('--json', '以 JSON 输出')
+    .action(withErrorHandler({ command: 'doulist remove', suggestion: '可尝试：douban doulist remove 163361938 @3' }, async (doulistId, target, opts) => {
+      const auth = await withSpinner('正在检查登录状态...', () => ensureAuth(), !opts.json);
+      await withSpinner('正在移除条目...', () => removeDoulistItem({ doulistId, target, cookies: auth.cookies }), !opts.json);
+      if (opts.json) console.log(JSON.stringify({ ok: true }));
+      else console.log(`\n✓ 已从豆列 ${doulistId} 移除 ${target}`);
+    }));
+
+  doulist
+    .command('edit <doulistId>')
+    .description('编辑豆列标题 / 简介（仅创建者可改）')
+    .option('--title <title>', '新标题')
+    .option('--about <text>', '新简介')
+    .option('--json', '以 JSON 输出')
+    .action(withErrorHandler({ command: 'doulist edit', suggestion: '可尝试：douban doulist edit 163361938 --title "新标题"' }, async (doulistId, opts) => {
+      if (!opts.title && opts.about === undefined) {
+        throw new Error('请至少指定 --title 或 --about 之一');
+      }
+      const auth = await withSpinner('正在检查登录状态...', () => ensureAuth(), !opts.json);
+      await withSpinner('正在编辑豆列...', () => editDoulist({ doulistId, title: opts.title, about: opts.about, cookies: auth.cookies }), !opts.json);
+      if (opts.json) console.log(JSON.stringify({ ok: true }));
+      else console.log(`\n✓ 已更新豆列 ${doulistId}`);
+    }));
+
+  doulist
+    .command('follow <doulistId>')
+    .description('关注豆列 / 书单 / 影单')
+    .option('--json', '以 JSON 输出')
+    .action(withErrorHandler({ command: 'doulist follow', suggestion: '可尝试：douban doulist follow 163361938' }, async (doulistId, opts) => {
+      const auth = await withSpinner('正在检查登录状态...', () => ensureAuth(), !opts.json);
+      await withSpinner('正在关注...', () => followDoulist(doulistId, auth.cookies), !opts.json);
+      if (opts.json) console.log(JSON.stringify({ ok: true }));
+      else console.log(`\n✓ 已关注豆列 ${doulistId}`);
+    }));
+
+  doulist
+    .command('unfollow <doulistId>')
+    .description('取消关注豆列 / 书单 / 影单')
+    .option('--json', '以 JSON 输出')
+    .action(withErrorHandler({ command: 'doulist unfollow', suggestion: '可尝试：douban doulist unfollow 163361938' }, async (doulistId, opts) => {
+      const auth = await withSpinner('正在检查登录状态...', () => ensureAuth(), !opts.json);
+      await withSpinner('正在取消关注...', () => unfollowDoulist(doulistId, auth.cookies), !opts.json);
+      if (opts.json) console.log(JSON.stringify({ ok: true }));
+      else console.log(`\n✓ 已取消关注豆列 ${doulistId}`);
     }));
 
   // ── 兼容别名：list = doulist hot（保留旧入口）──

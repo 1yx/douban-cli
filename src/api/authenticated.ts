@@ -147,7 +147,7 @@ function parseJsonApiResult(text: string): DoubanJsonResponse {
   return parsed;
 }
 
-async function postForm(url: string, data: Record<string, string>, cookies: string, referer: string): Promise<DoubanJsonResponse> {
+export async function postForm(url: string, data: Record<string, string>, cookies: string, referer: string): Promise<DoubanJsonResponse> {
   const res = await fetch(url, {
     method: 'POST',
     headers: {

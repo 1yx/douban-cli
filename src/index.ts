@@ -29,7 +29,8 @@ program.configureHelp({
     const groups: Record<string, string[]> = {
       '电影': ['hot', 'tv', 'rank', 'top250', 'now', 'coming', 'weekly', 'movie', 'rating', 'reviews', 'comments'],
       '书籍': ['book'],
-      '用户': ['me', 'user', 'config', 'list', 'login', 'whoami', 'logout', 'mark', 'unmark', 'rate', 'comment', 'review', 'feed', 'stats', 'export', 'follow', 'unfollow'],
+      '豆列': ['doulist', 'list'],
+      '用户': ['me', 'user', 'config', 'login', 'whoami', 'logout', 'mark', 'unmark', 'rate', 'comment', 'review', 'feed', 'stats', 'export', 'follow', 'unfollow'],
       '搜索': ['search']
     };
 
