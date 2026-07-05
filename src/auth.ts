@@ -189,7 +189,7 @@ export function parseCookieHeader(header: string): { dbcl2: string; ck?: string 
   const cleaned = header.replace(/^\s*cookie\s*:\s*/i, '');
   const dbcl2 = extractCookieValue(cleaned, 'dbcl2');
   if (!dbcl2) return null;
-  const ck = extractCookieValue(header, 'ck');
+  const ck = extractCookieValue(cleaned, 'ck');
   return { dbcl2, ck };
 }
 
@@ -409,7 +409,7 @@ function resolveDefaultBrowser(): BrowserInfo | null {
       return mapDesktopEntry(out.stdout.trim().toLowerCase());
     }
     if (process.platform === 'win32') {
-      const out = spawnSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice', '/v', 'ProgId'], { encoding: 'utf8' });
+      const out = spawnSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice', '/v', 'ProgId'], { encoding: 'utf8' });
       const match = out.stdout.match(/ProgId\s+REG_SZ\s+(\S+)/i);
       return match ? mapProgId(match[1]) : null;
     }
@@ -662,8 +662,14 @@ export async function loginWithBrowser(): Promise<AuthSession> {
       for (let attempt = 0; attempt < 30; attempt++) {
         if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 2000));
         const candidate = await extractFromBrowsers();
+        if (!candidate) continue;
         // 之前未登录（staleDbcl2 为空）→ 任何 dbcl2 都是新的；之前有旧值 → 必须值变化才算新登录
-        if (candidate && (!staleDbcl2 || candidate.dbcl2 !== staleDbcl2)) {
+        if (!staleDbcl2 || candidate.dbcl2 !== staleDbcl2) {
+          return candidate;
+        }
+        // 值未变化：可能是开头 isValidSession 因瞬时网络/解析失败误判为失效，
+        // 但浏览器其实已登录且 cookie 未变。重验一次，通过则复用，避免白等 60s 后报失败。
+        if (await isValidSession(candidate)) {
           return candidate;
         }
       }

@@ -134,12 +134,16 @@ douban login --cookie "dbcl2=xxxxx"
 
 请确认 Cookie 中包含 `dbcl2` 这一项。
 
-**2. 使用 puppeteer 登录**。为避免 ~300MB Chromium 下载，puppeteer 没有加入 `package.json` 。如需浏览器驱动的自动登录，可自行安装：
+**2. 使用 puppeteer 登录**。为避免 ~300MB Chromium 下载，puppeteer 没有加入 `package.json` 。如需浏览器驱动的自动登录，可自行安装。
+
+CLI 用裸 `import('puppeteer')` 加载，因此 puppeteer 必须装在 CLI 运行时能解析到的同一个 `node_modules` / 全局安装上下文里。全局安装或 `npx` 运行 CLI 时，在工作目录跑 `npm i puppeteer` 可能加载不到，请装到 CLI 的全局前缀（`npm i -g puppeteer`）或使用 `douban login --cookie` 手动导入：
 
 ```bash
-npm i puppeteer
+npm i -g puppeteer
 douban login         # 安装后会自动走 puppeteer 自动登录流程
 ```
+
+> 备注：浏览器自动提取 Cookie 目前覆盖 **Google Chrome / Edge / Firefox / Safari** 的默认 profile。Brave / Arc / Vivaldi 等 Chromium 衍生浏览器因 profile 目录与 Google Chrome 不同，可能抓不到——请改用 `douban login --cookie` 手动导入。
 
 ### 标记/评分/评论（需登录）
 

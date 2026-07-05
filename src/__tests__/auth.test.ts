@@ -30,6 +30,11 @@ describe('auth.parseCookieHeader', () => {
     const result = parseCookieHeader('Cookie: dbcl2="ajksdf"; ck=ABCD');
     expect(result).toEqual({ dbcl2: 'ajksdf', ck: 'ABCD' });
   });
+
+  it('Cookie: 前缀场景下 ck 在首位也能解析', () => {
+    const result = parseCookieHeader('Cookie: ck=ABCD; dbcl2="ajksdf"');
+    expect(result).toEqual({ dbcl2: 'ajksdf', ck: 'ABCD' });
+  });
 });
 
 describe('auth.parseNetscapeCookies', () => {
