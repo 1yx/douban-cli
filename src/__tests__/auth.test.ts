@@ -25,6 +25,11 @@ describe('auth.parseCookieHeader', () => {
   it('空字符串返回 null', () => {
     expect(parseCookieHeader('')).toBeNull();
   });
+
+  it('容忍整行请求头的 Cookie: 前缀', () => {
+    const result = parseCookieHeader('Cookie: dbcl2="ajksdf"; ck=ABCD');
+    expect(result).toEqual({ dbcl2: 'ajksdf', ck: 'ABCD' });
+  });
 });
 
 describe('auth.parseNetscapeCookies', () => {

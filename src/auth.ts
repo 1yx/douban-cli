@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import readline from 'node:readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
+import { stdin as input, stderr as output } from 'node:process';
 import { withSpinner } from './utils/spinner.js';
 import { getCurrentUserProfile } from './api/authenticated.js';
 
@@ -185,7 +185,9 @@ function extractCookieValue(header: string, name: string): string | undefined {
 
 /** 从完整的 Cookie 字符串中解析出 dbcl2（必需）与 ck（可选）。 */
 export function parseCookieHeader(header: string): { dbcl2: string; ck?: string } | null {
-  const dbcl2 = extractCookieValue(header, 'dbcl2');
+  // 容忍整行请求头：剥掉可选的 `Cookie:` / `cookie:` 前缀，避免用户从 F12 复制整行时被拒
+  const cleaned = header.replace(/^\s*cookie\s*:\s*/i, '');
+  const dbcl2 = extractCookieValue(cleaned, 'dbcl2');
   if (!dbcl2) return null;
   const ck = extractCookieValue(header, 'ck');
   return { dbcl2, ck };
@@ -295,6 +297,11 @@ interface PuppeteerLaunchOptions {
 type PuppeteerLaunch = (options?: PuppeteerLaunchOptions) => Promise<PuppeteerBrowser>;
 
 type BrowserName = 'chrome' | 'edge' | 'firefox' | 'safari';
+interface BrowserInfo {
+  name: BrowserName;
+  /** 是否明确为 Google Chrome（非 Brave/Arc/Vivaldi 等 Chromium 衍生）。决定能否用 Google Chrome 的 profile 覆盖。 */
+  isGoogleChrome: boolean;
+}
 
 function reportRecoverableError(context: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
@@ -345,40 +352,47 @@ function resolveChromeProfile(): string | undefined {
 }
 
 /** bundle id（macOS）→ BrowserName；未知或非浏览器返回 null。 */
-function mapBrowserBundle(bundle?: string): BrowserName | null {
+function mapBrowserBundle(bundle?: string): BrowserInfo | null {
   if (!bundle) return null;
   const b = bundle.toLowerCase();
-  if (b.includes('google.chrome')) return 'chrome';
-  if (b.includes('apple.safari')) return 'safari';
-  if (b.includes('mozilla.firefox')) return 'firefox';
-  if (b.includes('microsoft.edge')) return 'edge';
-  // Chromium 衍生（Brave/Arc/Vivaldi 等）复用 chrome provider
-  if (b.includes('brave') || b.includes('thebrowser') || b.includes('vivaldi') || b.includes('chromium')) return 'chrome';
+  if (b.includes('google.chrome')) return { name: 'chrome', isGoogleChrome: true };
+  if (b.includes('apple.safari')) return { name: 'safari', isGoogleChrome: false };
+  if (b.includes('mozilla.firefox')) return { name: 'firefox', isGoogleChrome: false };
+  if (b.includes('microsoft.edge')) return { name: 'edge', isGoogleChrome: false };
+  // Chromium 衍生（Brave/Arc/Vivaldi 等）复用 chrome provider，但不是 Google Chrome——
+  // 它们各自的 profile 目录与 Google Chrome 不同，不能用 Google Chrome 的 Local State 覆盖。
+  if (b.includes('brave') || b.includes('thebrowser') || b.includes('vivaldi') || b.includes('chromium')) return { name: 'chrome', isGoogleChrome: false };
   return null;
 }
 
 /** .desktop 文件名（Linux）→ BrowserName。 */
-function mapDesktopEntry(entry: string): BrowserName | null {
-  if (entry.includes('chrom') || entry.includes('brave') || entry.includes('vivaldi')) return 'chrome';
-  if (entry.includes('firefox')) return 'firefox';
-  if (entry.includes('edge')) return 'edge';
+function mapDesktopEntry(entry: string): BrowserInfo | null {
+  if (entry.includes('brave') || entry.includes('vivaldi')) return { name: 'chrome', isGoogleChrome: false };
+  if (entry.includes('google-chrome') || entry.includes('googlechrome')) return { name: 'chrome', isGoogleChrome: true };
+  if (entry.includes('chrom')) return { name: 'chrome', isGoogleChrome: false };
+  if (entry.includes('firefox')) return { name: 'firefox', isGoogleChrome: false };
+  if (entry.includes('edge')) return { name: 'edge', isGoogleChrome: false };
   return null;
 }
 
 /** ProgId（Windows）→ BrowserName。 */
-function mapProgId(progId: string): BrowserName | null {
+function mapProgId(progId: string): BrowserInfo | null {
   const p = progId.toLowerCase();
-  if (p.includes('chrom')) return 'chrome';
-  if (p.includes('firefox')) return 'firefox';
-  if (p.includes('edge')) return 'edge';
+  if (p.includes('firefox')) return { name: 'firefox', isGoogleChrome: false };
+  if (p.includes('edge')) return { name: 'edge', isGoogleChrome: false };
+  // ChromeHTML 是 Google Chrome 的默认 ProgId；其他含 chrom 的（如 BraveHTML）不是 Google Chrome
+  if (p.includes('chromehtml')) return { name: 'chrome', isGoogleChrome: true };
+  if (p.includes('chrom')) return { name: 'chrome', isGoogleChrome: false };
   return null;
 }
 
 /**
  * 解析系统默认浏览器（openLoginPage 实际打开页面的那个），优先从它提取 cookie，避免无关浏览器的授权弹窗。
  * 读取失败返回 null，调用方降级为尝试所有支持的浏览器。
+ * 同时返回 isGoogleChrome：只有明确是 Google Chrome 时才可用它的 Local State 作为 profile 覆盖，
+ * Brave/Arc/Vivaldi 等 Chromium 衍生与 Google Chrome 的 profile 目录不同。
  */
-function resolveDefaultBrowser(): BrowserName | null {
+function resolveDefaultBrowser(): BrowserInfo | null {
   try {
     if (process.platform === 'darwin') {
       const plist = path.join(os.homedir(), 'Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist');
@@ -462,8 +476,12 @@ async function extractFromBrowsers(): Promise<AuthSession | null> {
     return null;
   }
 
-  // 与 openLoginPage 实际打开的 profile 对齐：读 Chrome 最近使用的 profile
-  const chromeProfile = resolveChromeProfile();
+  // 与 openLoginPage 实际打开的 profile 对齐：读 Google Chrome 最近使用的 profile。
+  // 注意：sweet-cookie 的 chrome provider 也覆盖 Brave/Arc/Vivaldi 等 Chromium 衍生，
+  // 但它们 profile 目录与 Google Chrome 不同，不能套用 Google Chrome 的 Local State，
+  // 因此只有明确检测到 Google Chrome 时才覆盖 profile，其他情况交由 sweet-cookie 走默认行为。
+  const resolved = resolveDefaultBrowser();
+  const chromeProfile = resolved?.isGoogleChrome ? resolveChromeProfile() : undefined;
 
   const tryExtract = async (browsers: BrowserName[]): Promise<AuthSession | null> => {
     try {
@@ -480,9 +498,10 @@ async function extractFromBrowsers(): Promise<AuthSession | null> {
   };
 
   // openLoginPage() 只用默认浏览器打开登录页，用户只能在那里登录，cookie 也必然在那里。
-  // 因此只试默认浏览器即可；检测失败时退回最常见的 chrome。不再全量试所有浏览器，避免无关浏览器的授权弹窗。
-  const target = resolveDefaultBrowser() ?? 'chrome';
-  return tryExtract([target]);
+  // 因此检测到默认浏览器时只试它，避免无关浏览器的授权弹窗；检测失败则按四浏览器顺序全量兜底
+  // （sweet-cookie 对 browsers 列表是「全试 + 合并」不短路，接受此路径的弹窗代价换可用性）。
+  const target = resolved?.name;
+  return tryExtract(target ? [target] : ['chrome', 'edge', 'firefox', 'safari']);
 }
 
 function openLoginPage(): void {
@@ -628,7 +647,8 @@ export async function loginWithBrowser(): Promise<AuthSession> {
 
   // 交互阶段：打开默认浏览器 + 等用户登录后回车。
   // 关键：这里不能用 spinner——spinner 每 80ms 重写一行，会把 readline 的「按回车」提示盖住，表现为卡死。
-  console.log('未检测到登录态，改为打开默认浏览器：请在浏览器完成豆瓣登录后，回到终端按回车继续。');
+  // 所有提示走 stderr：`douban login --json` 走到该路径时 stdout 只输出最终 JSON，不被这些提示污染。
+  console.error('未检测到登录态，改为打开默认浏览器：请在浏览器完成豆瓣登录后，回到终端按回车继续。');
   openLoginPage();
   await waitForEnter();
 
