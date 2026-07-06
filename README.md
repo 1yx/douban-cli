@@ -32,7 +32,7 @@ Douban CLI - browse movies, TV shows, books, and personal collections from the t
 - `list` 热门豆列
 
 ### Auth & Social / 登录与社交
-- `login` 登录并缓存 Cookie
+- `login` 登录并缓存 Cookie（支持 `--cookie` 手动导入，详见下方「登录方式」）
 - `whoami` 查看当前登录用户
 - `logout` 清除本地登录态
 - `mark` 标记想看/看过/在看
@@ -117,6 +117,33 @@ douban login
 douban whoami
 douban logout
 ```
+
+#### 登录方式
+
+`douban login` 默认尝试自动登录（打开浏览器 → 提取 Cookie）。在 macOS 上，自动提取豆瓣 Cookie 需授予 keychain 权限以解密豆瓣网的 cookie，常因钥匙串/磁盘权限失败而抓取不到登录态。若不授权 keychain，可选用以下方式替代。
+
+**1. 手动导入 Cookie**
+
+```bash
+# 1) Netscape cookies.txt 文件（用「Get cookies.txt LOCALLY」等扩展导出整站 cookie）
+douban login --cookie www.douban.com_cookies.txt
+
+# 2) 或直接传 Cookie 字符串（F12 → Network → 请求头里的 cookie 整行复制）
+douban login --cookie "dbcl2=xxxxx"
+```
+
+请确认 Cookie 中包含 `dbcl2` 这一项。
+
+**2. 使用 puppeteer 登录**。为避免 ~300MB Chromium 下载，puppeteer 没有加入 `package.json` 。如需浏览器驱动的自动登录，可自行安装。
+
+CLI 用裸 `import('puppeteer')` 加载，因此 puppeteer 必须装在 CLI 运行时能解析到的同一个 `node_modules` / 全局安装上下文里。全局安装或 `npx` 运行 CLI 时，在工作目录跑 `npm i puppeteer` 可能加载不到，请装到 CLI 的全局前缀（`npm i -g puppeteer`）或使用 `douban login --cookie` 手动导入：
+
+```bash
+npm i -g puppeteer
+douban login         # 安装后会自动走 puppeteer 自动登录流程
+```
+
+> 备注：浏览器自动提取 Cookie 目前覆盖 **Google Chrome / Edge / Firefox / Safari** 的默认 profile。Brave / Arc / Vivaldi 等 Chromium 衍生浏览器因 profile 目录与 Google Chrome 不同，可能抓不到——请改用 `douban login --cookie` 手动导入。
 
 ### 标记/评分/评论（需登录）
 
