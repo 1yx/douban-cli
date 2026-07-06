@@ -497,11 +497,16 @@ async function extractFromBrowsers(): Promise<AuthSession | null> {
     }
   };
 
-  // openLoginPage() 只用默认浏览器打开登录页，用户只能在那里登录，cookie 也必然在那里。
-  // 因此检测到默认浏览器时只试它，避免无关浏览器的授权弹窗；检测失败则按四浏览器顺序全量兜底
-  // （sweet-cookie 对 browsers 列表是「全试 + 合并」不短路，接受此路径的弹窗代价换可用性）。
+  // 先试默认浏览器：命中即返回（不触发其他浏览器的授权弹窗）。
+  // 没命中再按四浏览器顺序全量兜底——extractFromBrowsers 也被 detectAuthSession()/douban me
+  // 等无登录页场景调用，那时默认浏览器不一定持有 cookie（如默认 Safari 但豆瓣在 Chrome 登录），
+  // 必须能回落到其他浏览器。sweet-cookie 对列表是「全试 + 合并」不短路，此处手动短路。
   const target = resolved?.name;
-  return tryExtract(target ? [target] : ['chrome', 'edge', 'firefox', 'safari']);
+  if (target) {
+    const primary = await tryExtract([target]);
+    if (primary) return primary;
+  }
+  return tryExtract(['chrome', 'edge', 'firefox', 'safari']);
 }
 
 function openLoginPage(): void {
